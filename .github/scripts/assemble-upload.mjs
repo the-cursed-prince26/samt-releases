@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 export const REPOSITORY = "the-cursed-prince26/samt-releases";
 export const CONTEXT = "samt/release-upload";
-const marker = /<!-- samt-admin:v1\n([\s\S]*?)\n-->/;
+const marker = /<!-- samt-admin:v1\r?\n([\s\S]*?)\r?\n-->/;
 const validSha = (value) =>
   typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
 const assert = (condition, message) => {
@@ -124,6 +124,87 @@ export async function assembleUpload({ client, payload, repository }) {
         Array.isArray(session.packages) &&
         session.packages.length === preview.packages.length,
       "Invalid package count",
+    );
+    assert(
+      new Set(preview.packages.map((pkg) => pkg.platform)).size ===
+        preview.packages.length,
+      "Duplicate package platform",
+    );
+    for (const platform of ["android", "ios"]) {
+      const policy = preview.manifest?.[platform];
+      assert(
+        policy &&
+          Number.isSafeInteger(policy.latest_build) &&
+          Number.isSafeInteger(policy.min_supported_build) &&
+          policy.min_supported_build >= 1 &&
+          policy.latest_build >= policy.min_supported_build &&
+          typeof policy.force_update === "boolean" &&
+          typeof policy.message === "string",
+        "Invalid update policy",
+      );
+      const pkg = preview.packages.find((item) => item.platform === platform);
+      const base = `https://github.com/${REPOSITORY}/releases`;
+      if (pkg) {
+        assert(
+          pkg.app_id === "com.mhsous.samt" &&
+            pkg.version === preview.version &&
+            pkg.build === policy.latest_build &&
+            pkg.filename
+              .toLowerCase()
+              .endsWith(platform === "android" ? ".apk" : ".ipa") &&
+            policy.update_url ===
+              `${base}/download/${encodeURIComponent(preview.tag)}/${encodeURIComponent(pkg.filename)}`,
+          "Manifest does not target the approved package",
+        );
+      } else if (!(
+        policy.latest_build === 1 &&
+        policy.min_supported_build === 1 &&
+        !policy.force_update &&
+        policy.update_url === `${base}/latest`
+      )) {
+        assert(
+          typeof policy.update_url === "string" &&
+            policy.update_url.startsWith(`${base}/download/`),
+          "Unchanged platform must target a release asset",
+        );
+        const url = new URL(policy.update_url);
+        const parts = policy.update_url
+          .slice(`${base}/download/`.length)
+          .split("/");
+        assert(
+          parts.length === 2 &&
+            parts.every(Boolean) &&
+            !url.search &&
+            !url.hash,
+          "Invalid unchanged platform URL",
+        );
+        const release = await client.request(
+          "GET",
+          `/releases/tags/${encodeURIComponent(decodeURIComponent(parts[0]))}`,
+        );
+        const matches = release.assets?.filter(
+          (asset) =>
+            asset.name === decodeURIComponent(parts[1]) &&
+            asset.state === "uploaded" &&
+            asset.size > 0 &&
+            /^sha256:[a-f0-9]{64}$/.test(asset.digest || ""),
+        );
+        assert(
+          !release.draft &&
+            !release.prerelease &&
+            matches?.length === 1 &&
+            matches[0].name
+              .toLowerCase()
+              .endsWith(platform === "android" ? ".apk" : ".ipa"),
+          "Unchanged platform asset is unavailable",
+        );
+      }
+    }
+    assert(
+      preview.packages.every((pkg) =>
+        ["android", "ios"].includes(pkg.platform),
+      ),
+      "Invalid platform",
     );
     const paths = new Map(tree.tree.map((item) => [item.path, item]));
     const files = [];
