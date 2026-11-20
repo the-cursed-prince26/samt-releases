@@ -1,0 +1,16 @@
+{
+  "android": {
+    "latest_build": 1,
+    "min_supported_build": 1,
+    "force_update": false,
+    "message": "يتوفر تحديث جديد لتطبيق سَمت.",
+    "update_url": "https://github.com/the-cursed-prince26/samt-releases/releases/latest"
+  },
+  "ios": {
+    "latest_build": 1,
+    "min_supported_build": 1,
+    "force_update": false,
+    "message": "يتوفر تحديث جديد لتطبيق سَمت. نزّل ملف IPA وثبّته عبر SideStore فوق النسخة الحالية.",
+    "update_url": "https://github.com/the-cursed-prince26/samt-releases/releases/latest"
+  }
+}
