@@ -1,0 +1,31 @@
+name: Assemble admin release upload
+
+on:
+  repository_dispatch:
+    types: [samt-release-upload-v1]
+
+permissions:
+  contents: write
+  statuses: write
+
+concurrency:
+  group: samt-upload-${{ github.event.client_payload.release_id }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    if: github.repository == 'the-cursed-prince26/samt-releases'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      # repository_dispatch checks out trusted default-branch code, never the upload ref.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+      - name: Assemble and upload verified assets
+        run: node .github/scripts/assemble-upload.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
