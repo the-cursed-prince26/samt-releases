@@ -101,17 +101,29 @@ export async function assembleUpload({ client, payload, repository }) {
     assert(raw.length <= 65536, "Oversized session metadata");
     const session = JSON.parse(raw.toString("utf8"));
     const draft = await client.request("GET", `/releases/${id}`);
-    assert(draft.draft && !draft.prerelease, "Release must remain a draft");
+    assert(String(draft.id) === id, "Release ID changed");
+    assert(
+      draft.draft && !draft.published_at && !draft.prerelease,
+      "Release must remain a draft",
+    );
     const match = draft.body?.match(marker);
     assert(match, "Missing managed preview");
     const envelope = JSON.parse(match[1]);
     assert(
-      envelope.upload?.sha === commit && envelope.upload?.ref === ref,
+      envelope.upload?.sha === commit &&
+        envelope.upload?.ref === ref &&
+        (envelope.release_id == null || envelope.release_id === id),
       "Session is not authorized by draft",
     );
     const preview = envelope.preview;
     assert(
-      preview?.tag === draft.tag_name &&
+      typeof preview?.tag === "string" &&
+        /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(preview.tag) &&
+        !preview.tag.startsWith("untagged-") &&
+        !preview.tag.includes("..") &&
+        !/\.$|\.lock$/.test(preview.tag) &&
+        (preview.tag === draft.tag_name ||
+          /^untagged-[a-f0-9]+$/.test(draft.tag_name)) &&
         session.version === 1 &&
         session.release_id === id &&
         session.preview_id === preview.preview_id,
@@ -299,7 +311,10 @@ export async function assembleUpload({ client, payload, repository }) {
     // Recheck authorization after the potentially long download, before writes.
     const current = await client.request("GET", `/releases/${id}`);
     assert(
-      current.draft &&
+      String(current.id) === id &&
+        current.draft &&
+        !current.published_at &&
+        !current.prerelease &&
         current.body === draft.body &&
         current.tag_name === draft.tag_name,
       "Draft changed during assembly",
