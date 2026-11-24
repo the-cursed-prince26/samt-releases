@@ -2,7 +2,7 @@ name: Assemble admin release upload
 
 on:
   repository_dispatch:
-    types: [samt-release-upload-v1]
+    types: [samt-release-upload-v1, samt-release-public-v1]
 
 permissions:
   contents: write

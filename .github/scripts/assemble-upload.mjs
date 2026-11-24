@@ -4,6 +4,7 @@ import { mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 export const REPOSITORY = "the-cursed-prince26/samt-releases";
 export const CONTEXT = "samt/release-upload";
@@ -362,11 +363,164 @@ export async function assembleUpload({ client, payload, repository }) {
   }
 }
 
+export async function probePublicRelease(
+  release,
+  preview,
+  { fetchImpl = fetch } = {},
+) {
+  const base = `https://github.com/${REPOSITORY}/releases`;
+  const get = (url, headers = {}) =>
+    fetchImpl(url, {
+      headers: { "Cache-Control": "no-cache", ...headers },
+      credentials: "omit",
+      signal: AbortSignal.timeout(30000),
+    });
+  const response = await get(
+    `${base}/latest/download/update.json?check=${Date.now()}`,
+  );
+  assert(response.status === 200, "Public update manifest is unavailable");
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      assert(size <= 1024 * 1024, "Public manifest is too large");
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel();
+  }
+  const bytes = Buffer.concat(chunks);
+  assert(
+    isDeepStrictEqual(JSON.parse(bytes.toString("utf8")), preview.manifest),
+    "Public Latest manifest is stale or differs from the approved preview",
+  );
+  const manifestAsset = release.assets?.find(
+    (asset) => asset.name === "update.json",
+  );
+  assert(
+    manifestAsset?.digest ===
+      `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+    "Public manifest digest differs from the published asset",
+  );
+  for (const pkg of preview.packages) {
+    assert(
+      /^[A-Za-z0-9._-]+\.(apk|ipa)$/i.test(pkg.filename),
+      "Invalid package filename",
+    );
+    const url = `${base}/download/${encodeURIComponent(preview.tag)}/${encodeURIComponent(pkg.filename)}`;
+    assert(
+      preview.manifest[pkg.platform]?.update_url === url,
+      "Unexpected package URL",
+    );
+    const asset = release.assets?.filter((item) => item.name === pkg.filename);
+    assert(
+      asset?.length === 1 &&
+        asset[0].state === "uploaded" &&
+        asset[0].size === pkg.size &&
+        asset[0].digest === `sha256:${pkg.sha256}`,
+      "Published package differs from the preview",
+    );
+    const download = await get(url, { Range: "bytes=0-3" });
+    try {
+      assert(
+        download.status === 206 &&
+          download.headers.get("content-range") === `bytes 0-3/${pkg.size}` &&
+          download.headers.get("content-length") === "4",
+        "Public package range is unavailable or has the wrong size",
+      );
+      const prefix = new Uint8Array(await download.arrayBuffer());
+      assert(
+        prefix.length === 4 &&
+          prefix[0] === 0x50 &&
+          prefix[1] === 0x4b &&
+          prefix[2] === 3 &&
+          prefix[3] === 4,
+        "Public package is not a ZIP archive",
+      );
+    } finally {
+      if (download.body && !download.bodyUsed) await download.body.cancel();
+    }
+  }
+}
+
+export async function verifyPublishedRelease({
+  client,
+  payload,
+  repository,
+  probe = probePublicRelease,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
+  assert(repository === REPOSITORY, "Unexpected repository");
+  const { commit, release_id: id, request_id: requestId } = payload || {};
+  assert(
+    validSha(commit) && /^\d+$/.test(id) && /^[a-f0-9-]{36}$/.test(requestId),
+    "Invalid verification request",
+  );
+  const status = (state, description) =>
+    client.request("POST", `/statuses/${commit}`, {
+      state,
+      context: `samt/release-public/${id}/${requestId}`,
+      description,
+    });
+  try {
+    await status("pending", "Checking anonymous release downloads");
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const release = await client.request("GET", `/releases/${id}`);
+        const latest = await client.request("GET", "/releases/latest");
+        const envelope = JSON.parse(release.body?.match(marker)?.[1] || "null");
+        assert(
+          !release.draft &&
+            !release.prerelease &&
+            release.published_at &&
+            String(release.id) === id &&
+            latest.id === release.id &&
+            release.tag_name === envelope?.preview?.tag &&
+            (envelope.upload?.sha === commit ||
+              (!envelope.upload &&
+                (await client.request("GET", "/commits/main")).sha === commit)),
+          "Release identity or Latest changed",
+        );
+        await probe(release, envelope.preview);
+        const current = await client.request("GET", "/releases/latest");
+        assert(
+          current.id === release.id &&
+            current.tag_name === release.tag_name &&
+            current.updated_at === release.updated_at,
+          "Latest changed during public verification",
+        );
+        await status(
+          "success",
+          "Anonymous manifest and package downloads verified",
+        );
+        return;
+      } catch (error) {
+        if (attempt === 3) throw error;
+        await sleep(5000 * (attempt + 1));
+      }
+    }
+  } catch (error) {
+    await status(
+      "failure",
+      "Published release downloads are not yet verified",
+    ).catch(() => {});
+    throw error;
+  }
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const event = JSON.parse(
     await readFile(process.env.GITHUB_EVENT_PATH, "utf8"),
   );
-  await assembleUpload({
+  const run =
+    event.action === "samt-release-public-v1"
+      ? verifyPublishedRelease
+      : assembleUpload;
+  await run({
     client: new GitHubRunner(process.env.GITHUB_TOKEN),
     payload: event.client_payload,
     repository: process.env.GITHUB_REPOSITORY,
