@@ -235,9 +235,24 @@ export async function assembleUpload({ client, payload, repository }) {
           /^[a-f0-9]{64}$/.test(pkg.sha256),
         "Package differs from approved preview",
       );
+      const chunkSizes =
+        pkg.chunk_sizes === undefined
+          ? Array.from(
+              { length: Math.ceil(pkg.size / (16 * 1024 ** 2)) },
+              (_, part) =>
+                Math.min(16 * 1024 ** 2, pkg.size - part * 16 * 1024 ** 2),
+            )
+          : pkg.chunk_sizes;
       assert(
         Array.isArray(pkg.chunks) &&
-          pkg.chunks.length === Math.ceil(pkg.size / (16 * 1024 ** 2)),
+          Array.isArray(chunkSizes) &&
+          pkg.chunks.length === chunkSizes.length &&
+          chunkSizes.length <= Math.ceil(pkg.size / (4 * 1024 ** 2)) &&
+          chunkSizes.every(
+            (size) =>
+              Number.isSafeInteger(size) && size > 0 && size <= 16 * 1024 ** 2,
+          ) &&
+          chunkSizes.reduce((sum, size) => sum + size, 0) === pkg.size,
         "Invalid chunk count",
       );
       const file = join(directory, String(index));
@@ -252,7 +267,7 @@ export async function assembleUpload({ client, payload, repository }) {
             validSha(chunkSha) &&
               chunkEntry?.type === "blob" &&
               chunkEntry.sha === chunkSha &&
-              chunkEntry.size <= 16 * 1024 ** 2,
+              chunkEntry.size === chunkSizes[part],
             "Chunk is not in the approved upload tree",
           );
           const bytes = await client.request(
@@ -261,7 +276,7 @@ export async function assembleUpload({ client, payload, repository }) {
             undefined,
             { raw: true },
           );
-          const expectedLength = Math.min(16 * 1024 ** 2, pkg.size - length);
+          const expectedLength = chunkSizes[part];
           assert(bytes.length === expectedLength, "Invalid chunk length");
           const blobHash = createHash("sha1")
             .update(`blob ${bytes.length}\0`)
